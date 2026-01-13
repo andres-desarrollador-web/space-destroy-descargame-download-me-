@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Asteroids - completo (tienda, gemas, dificultad dinámica)</title>
+<style>
+  body { margin:0; background:#000; color:#fff; font-family: sans-serif; }
+  canvas { display:block; margin:0 auto; background:#000; cursor: crosshair; z-index:0; }
+  #ui { position:fixed; left:10px; top:10px; z-index:60; }
+  .bar { width:220px; height:12px; background:#333; border:1px solid #555; margin-bottom:6px; }
+  .fill { height:100%; background:linear-gradient(#0f0,#0a0); width:100%; }
+  #lifeFill { background:linear-gradient(#f33,#a00); width:100%; }
+  #ui .row { margin-bottom:6px; display:flex; align-items:center; gap:8px; }
+  #shopBtn { padding:6px 10px; background:#2a8; border:none; color:#000; cursor:pointer; border-radius:4px; }
+  #shopBtn:hover { filter:brightness(1.08); }
+  #difficulty { position:fixed; left:10px; bottom:10px; color:#ccc; font-size:13px; z-index:60; }
+  #overlay, #overlayDead, #shopOverlay {
+    position:fixed; left:0; top:0; width:100%; height:100%; display:flex;
+    align-items:center; justify-content:center; background: rgba(0,0,0,0.75);
+    z-index:200; color:#fff; font-family:sans-serif; flex-direction:column;
+    visibility:hidden; pointer-events:none;
+  }
+  .overlay-visible { visibility:visible; pointer-events:auto; }
+  .menu { background:#111; padding:20px; border:2px solid #444; text-align:center; min-width:260px; }
+  .btn { margin-top:12px; padding:8px 16px; background:#28a; color:#fff; border:none; cursor:pointer; border-radius:6px; }
+  .btn:hover { background:#39b; }
+  .shop-item { display:flex; justify-content:space-between; align-items:center; padding:8px 10px; border-bottom:1px solid #222; }
+  .shop-item:last-child { border-bottom:none; }
+  .small { font-size:12px; color:#ccc; }
+  #hint { font-size:12px; color:#ccc; margin-top:6px; text-align:right; position:fixed; right:10px; top:10px; z-index:60; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div class="row"><strong>Gemas:</strong> <span id="gemCount">0</span></div>
+  <div>Gasolina</div>
+  <div class="bar"><div id="fuelFill" class="fill"></div></div>
+  <div>Vida</div>
+  <div class="bar"><div id="lifeFill" class="fill"></div></div>
+  <div>Puntuación: <span id="score">0</span></div>
+  <div class="row"><button id="shopBtn">Tienda (T)</button></div>
+</div>
+
+<div id="difficulty">Dificultad: 1</div>
+<div id="hint">Controles: W acelerar, S retroceder, ratón rotar, Shift boost, X estabilizar, Espacio disparar</div>
+
+<!-- Overlay gasolina agotada -->
+<div id="overlay">
+  <div class="menu">
+    <h2>¡Perdiste!</h2>
+    <p class="small">Se acabó la gasolina.</p>
+    <button id="restartBtn" class="btn">Reiniciar</button>
+  </div>
+</div>
+
+<!-- Overlay muerte -->
+<div id="overlayDead">
+  <div class="menu">
+    <h2>Moriste</h2>
+    <p class="small">Tu nave explotó.</p>
+    <button id="restartBtn2" class="btn">Reiniciar</button>
+  </div>
+</div>
+
+<!-- Tienda -->
+<div id="shopOverlay">
+  <div class="menu" style="min-width:360px;">
+    <h2>Tienda</h2>
+    <div class="small" style="margin-bottom:8px">Usa gemas para comprar mejoras y consumibles.</div>
+    <div id="shopItems"></div>
+    <div style="display:flex; gap:8px; justify-content:center; margin-top:12px;">
+      <button id="closeShop" class="btn">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<canvas id="game" width="900" height="600"></canvas>
+
+<script>
+/* -------------------------
+   SPRITES (desde código)
+   ------------------------- */
+const fuelImg = new Image();
+fuelImg.src = 'https://thumbs4.imagebam.com/2c/c1/77/ME19Q0HL_t.png'; // asigna ruta o data URL si quieres sprite de gasolina
+const gemImg = new Image();
+gemImg.src = 'https://thumbs4.imagebam.com/12/74/67/ME19Q0JA_t.png';  // asigna ruta o data URL si quieres sprite de gema
+
+/* -------------------------
+   UTILIDADES Y CANVAS
+   ------------------------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+let keys = {};
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+let mouseX = W/2, mouseY = H/2;
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = e.clientX - rect.left;
+  mouseY = e.clientY - rect.top;
+});
+
+// wrapPos must be defined before update() uses it
+function wrapPos(obj){
+  if (obj.x < 0) obj.x += W;
+  if (obj.x > W) obj.x -= W;
+  if (obj.y < 0) obj.y += H;
+  if (obj.y > H) obj.y -= H;
+}
+
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function randInt(min,max){ return Math.floor(rand(min,max+1)); }
+
+/* -------------------------
+   ESTADO GLOBAL Y REINICIO
+   ------------------------- */
+let gameRunning = true;
+let gemCount = 0; // moneda de la tienda
+
+function setOverlayVisible(el, visible){
+  if(visible) el.classList.add('overlay-visible');
+  else el.classList.remove('overlay-visible');
+}
+
+function resetGame(){
+  player.x = W/2; player.y = H/2; player.angle = -Math.PI/2;
+  player.vx = 0; player.vy = 0; player.radius = 12;
+  player.shootTimer = 0;
+  fuel = fuelMax;
+  life = lifeMax;
+  score = 0;
+  gemCount = 0;
+  difficultyLevel = 1;
+  prevDifficultyCheckpoint = 0;
+  applyDifficulty(difficultyLevel);
+  bullets = []; asteroids = []; pickups = []; enemies = []; enemyBullets = []; particles = [];
+  asteroidSpawnTimer = 0;
+  enemySpawnTimer = 0;
+  for(let i=0;i<6;i++) spawnAsteroid(rand(0,W), rand(0,H), randInt(2,3));
+  setOverlayVisible(document.getElementById('overlay'), false);
+  setOverlayVisible(document.getElementById('overlayDead'), false);
+  setOverlayVisible(document.getElementById('shopOverlay'), false);
+  fuelDepleted = false; dying = false; dead = false; deathTimer = 0;
+  gameRunning = true;
+  updateUI();
+}
+
+/* -------------------------
+   JUGADOR
+   ------------------------- */
+const player = {
+  x: W/2, y: H/2, angle: -Math.PI/2,
+  vx:0, vy:0, radius:12,
+  thrust: 0.18,
+  rotSmooth: 0.28,
+  maxSpeed: 6.0,
+  boostMultiplier: 1.9,
+  shootCooldown: 0.22, shootTimer:0
+};
+
+/* -------------------------
+   RECURSOS Y PUNTUACIÓN
+   ------------------------- */
+let fuelMax = 100;
+let fuel = fuelMax;
+let score = 0;
+
+/* -------------------------
+   VIDA
+   ------------------------- */
+let lifeMax = 100;
+let life = lifeMax;
+
+/* -------------------------
+   FLAGS
+   ------------------------- */
+let fuelDepleted = false;
+let dying = false;
+let deathTimer = 0;
+let dead = false;
+
+/* -------------------------
+   ENTIDADES
+   ------------------------- */
+let bullets = [];
+let asteroids = [];
+let pickups = []; // {x,y,type:'gem'|'fuel'}
+let enemies = [];
+let enemyBullets = [];
+let particles = [];
+
+/* -------------------------
+   COSTOS Y UTILIDADES
+   ------------------------- */
+function fuelPercentToAmount(percent){ return fuelMax * (percent/100); }
+const MOVE_FUEL_PERCENT_PER_SECOND = 1; // 1% por segundo mientras se mantiene W
+const SHOOT_FUEL_PERCENT_PER_SHOT = 1;  // 1% por disparo
+
+/* -------------------------
+   DIFICULTAD DINÁMICA Y TAMAÑOS
+   ------------------------- */
+let difficultyLevel = 1;
+let prevDifficultyCheckpoint = 0;
+
+let asteroidSpeedBase = 1.0;
+let asteroidSpawnIntervalBase = 3.0;
+let enemySpawnIntervalBase = 5.5;
+let enemySpeedBase = 1.2;
+let enemyShootCooldownBase = 1.6;
+let enemyAccuracyBase = 0.65;
+
+let asteroidSpeedMultiplier = 1.0;
+let asteroidSpawnInterval = asteroidSpawnIntervalBase;
+let enemySpawnInterval = enemySpawnIntervalBase;
+let enemySpeedMultiplier = 1.0;
+let enemyShootCooldownMultiplier = 1.0;
+let enemyAccuracy = enemyAccuracyBase;
+
+let bigAsteroidProb = 0.35;
+let mediumAsteroidProb = 0.5;
+let smallAsteroidProb = 0.15;
+
+let asteroidSpawnTimer = 0;
+let enemySpawnTimer = 0;
+
+function applyDifficulty(level){
+  const expFactor = Math.pow(1.18, level - 1);
+  asteroidSpeedMultiplier = expFactor;
+  asteroidSpawnInterval = Math.max(0.15, asteroidSpawnIntervalBase / Math.pow(1.12, level - 1));
+  enemySpawnInterval = Math.max(0.12, enemySpawnIntervalBase / Math.pow(1.15, level - 1));
+  enemySpeedMultiplier = Math.pow(1.12, level - 1);
+  enemyShootCooldownMultiplier = Math.max(0.05, 1 / Math.pow(1.08, level - 1));
+  enemyAccuracy = Math.min(0.995, enemyAccuracyBase + (level - 1) * 0.02);
+
+  const baseBigProb = 0.35;
+  const reductionPerLevel = 0.06;
+  bigAsteroidProb = Math.max(0.05, baseBigProb - (level - 1) * reductionPerLevel);
+  mediumAsteroidProb = Math.max(0.15, 0.5 - (level - 1) * 0.03);
+  smallAsteroidProb = Math.max(0.3, 1 - bigAsteroidProb - mediumAsteroidProb);
+
+  document.getElementById('difficulty').textContent = 'Dificultad: ' + level;
+}
+
+/* -------------------------
+   ASTEROIDES
+   ------------------------- */
+function spawnAsteroid(x,y,size){
+  if(typeof size === 'undefined' || size === null){
+    const r = Math.random();
+    if(r < bigAsteroidProb) size = 3;
+    else if(r < bigAsteroidProb + mediumAsteroidProb) size = 2;
+    else size = 1;
+  }
+  const baseSpeed = 0.5 + (3-size)*0.6 + Math.random()*1.2;
+  const speed = baseSpeed * asteroidSpeedMultiplier;
+  const a = rand(0,Math.PI*2);
+  asteroids.push({
+    x:x, y:y, vx: Math.cos(a)*speed, vy: Math.sin(a)*speed,
+    size:size, angle: rand(0,Math.PI*2), rot: rand(-0.02,0.02),
+    radius: size===3?40: size===2?24:12,
+    hp: size
+  });
+}
+
+/* -------------------------
+   DIBUJOS
+   ------------------------- */
+function drawTriangle(x,y,angle,size,color,filled=true){
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(size,0);
+  ctx.lineTo(-size*0.6, size*0.7);
+  ctx.lineTo(-size*0.6, -size*0.7);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  if(filled) ctx.fill(); else ctx.stroke();
+  ctx.restore();
+}
+
+/* -------------------------
+   DISPARO JUGADOR (1% por disparo)
+   ------------------------- */
+function shoot(){
+  if(player.shootTimer>0 || fuel<=0 || !gameRunning) return;
+  const cost = fuelPercentToAmount(SHOOT_FUEL_PERCENT_PER_SHOT);
+  if(fuel < cost) return;
+  fuel = Math.max(0, fuel - cost);
+  const speed = 6;
+  const bx = player.x + Math.cos(player.angle)*(player.radius+6);
+  const by = player.y + Math.sin(player.angle)*(player.radius+6);
+  bullets.push({x:bx,y:by,vx:Math.cos(player.angle)*speed + player.vx, vy:Math.sin(player.angle)*speed + player.vy, life:60});
+  player.shootTimer = player.shootCooldown;
+}
+
+/* -------------------------
+   DISPARO ENEMIGO
+   ------------------------- */
+function enemyShoot(e){
+  const aimDirect = Math.random() < enemyAccuracy;
+  let ang;
+  if(aimDirect){
+    ang = Math.atan2(player.y - e.y, player.x - e.x);
+  } else {
+    const baseAng = Math.atan2(player.y - e.y, player.x - e.x);
+    const error = rand(-0.6,0.6) / Math.max(1, difficultyLevel/4);
+    ang = baseAng + error;
+  }
+  const speed = 4.2 * (0.9 + 0.2 * enemySpeedMultiplier);
+  enemyBullets.push({
+    x: e.x + Math.cos(ang)*(e.radius+6),
+    y: e.y + Math.sin(ang)*(e.radius+6),
+    vx: Math.cos(ang)*speed + e.vx,
+    vy: Math.sin(ang)*speed + e.vy,
+    life: 180
+  });
+}
+
+/* -------------------------
+   ENEMIGOS Y UTILIDADES
+   ------------------------- */
+function spawnEnemyAt(x,y, vx=0, vy=0){
+  enemies.push({
+    x: x, y: y,
+    vx: vx, vy: vy,
+    speed: enemySpeedBase * enemySpeedMultiplier, radius:14,
+    shootTimer: rand(0.5,2.0) * enemyShootCooldownMultiplier,
+    shootCooldown: (rand(1.0,2.5) * enemyShootCooldownMultiplier)
+  });
+}
+function spawnEnemyFromCorner(){
+  const corner = randInt(0,3);
+  let x = corner % 2 === 0 ? 0 : W;
+  let y = corner < 2 ? 0 : H;
+  x += (x===0) ? -20 : 20;
+  y += (y===0) ? -20 : 20;
+  const ang = Math.atan2(player.y - y, player.x - x);
+  const sp = (1.6 + Math.random()*1.2) * enemySpeedMultiplier;
+  const vx = Math.cos(ang)*sp;
+  const vy = Math.sin(ang)*sp;
+  spawnEnemyAt(x, y, vx, vy);
+}
+function spawnEnemyRandom(){
+  if(asteroids.length === 0){ spawnEnemyFromCorner(); return; }
+  if(Math.random() < 0.5){
+    const a = asteroids[randInt(0, asteroids.length-1)];
+    const jitter = 6;
+    const x = a.x + rand(-jitter,jitter);
+    const y = a.y + rand(-jitter,jitter);
+    spawnEnemyAt(x, y, a.vx + rand(-0.6,0.6), a.vy + rand(-0.6,0.6));
+  } else {
+    spawnEnemyFromCorner();
+  }
+}
+function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
+function spawnParticle(x,y, vx, vy, life, color, size){ particles.push({x,y,vx,vy,life,age:0,color,size}); }
+
+/* -------------------------
+   REGENERACIÓN CONDICIONADA
+   ------------------------- */
+let regenActive = false;
+setInterval(() => {
+  if (dead || dying) return;
+  if (!regenActive && life <= Math.floor(lifeMax * 0.20) && fuel > 0) {
+    regenActive = true;
+  }
+  if (regenActive) {
+    if (fuel <= 0) {
+      regenActive = false;
+      if (!fuelDepleted) {
+        fuelDepleted = true;
+        setOverlayVisible(document.getElementById('overlay'), true);
+        gameRunning = false;
+      }
+      return;
+    }
+    const fuelConsume = fuelPercentToAmount(1);
+    fuel = Math.max(0, fuel - fuelConsume);
+    const lifeGain = Math.round(lifeMax * 0.05);
+    life = Math.min(lifeMax, life + lifeGain);
+    updateUI();
+    if (life >= lifeMax) regenActive = false;
+    if (fuel <= 0 && !fuelDepleted) {
+      regenActive = false;
+      fuelDepleted = true;
+      setOverlayVisible(document.getElementById('overlay'), true);
+      gameRunning = false;
+    }
+  }
+}, 1000);
+
+/* -------------------------
+   TIENDA
+   ------------------------- */
+const shopItems = [
+  { id:'fuelPack', name:'Pack de gasolina', desc:'Rellena 50% de gasolina', cost:3, apply: () => { fuel = Math.min(fuelMax, fuel + fuelMax*0.5); } },
+  { id:'repair', name:'Reparación', desc:'Restaura 40% de vida', cost:5, apply: () => { life = Math.min(lifeMax, life + Math.round(lifeMax*0.4)); } },
+  { id:'cooldown', name:'Mejora de disparo', desc:'Reduce cooldown de disparo (-15%)', cost:8, apply: () => { player.shootCooldown = Math.max(0.05, player.shootCooldown * 0.85); } },
+  { id:'maxFuel', name:'Tanque ampliado', desc:'Aumenta gasolina máxima +25%', cost:12, apply: () => { fuelMax = Math.round(fuelMax * 1.25); fuel = Math.min(fuel, fuelMax); } },
+  { id:'boostRefill', name:'Recarga boost', desc:'Recarga simbólica de boost', cost:2, apply: () => { /* placeholder */ } }
+];
+
+function openShop(){
+  renderShop();
+  setOverlayVisible(document.getElementById('shopOverlay'), true);
+}
+
+function closeShop(){
+  setOverlayVisible(document.getElementById('shopOverlay'), false);
+}
+
+function renderShop(){
+  const container = document.getElementById('shopItems');
+  container.innerHTML = '';
+  shopItems.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'shop-item';
+    div.innerHTML = `<div>
+        <div><strong>${item.name}</strong></div>
+        <div class="small">${item.desc}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="small">Coste: <strong>${item.cost}</strong> 💎</div>
+        <button class="btn buyBtn" data-id="${item.id}" style="margin-top:6px;padding:6px 8px;">Comprar</button>
+      </div>`;
+    container.appendChild(div);
+  });
+  container.querySelectorAll('.buyBtn').forEach(b => {
+    b.addEventListener('click', () => {
+      const id = b.getAttribute('data-id');
+      buyItem(id);
+    });
+  });
+}
+
+function buyItem(id){
+  const item = shopItems.find(s => s.id === id);
+  if(!item) return;
+  if(gemCount < item.cost){
+    alert('No tienes suficientes gemas');
+    return;
+  }
+  gemCount -= item.cost;
+  item.apply();
+  updateUI();
+  alert(`Compraste: ${item.name}`);
+}
+
+/* -------------------------
+   ACTUALIZAR (loop)
+   ------------------------- */
+let last = performance.now();
+function update(){
+  const now = performance.now();
+  const dt = (now-last)/1000;
+  last = now;
+
+  if(!gameRunning) return;
+
+  // dificultad por cada 1000 puntos
+  const newCheckpoint = Math.floor(score / 1000);
+  if(newCheckpoint > prevDifficultyCheckpoint){
+    const increase = newCheckpoint - prevDifficultyCheckpoint;
+    difficultyLevel += increase;
+    prevDifficultyCheckpoint = newCheckpoint;
+    applyDifficulty(difficultyLevel);
+    console.log('Dificultad aumentada a', difficultyLevel);
+  }
+
+  // rotación hacia ratón
+  const targetAngle = Math.atan2(mouseY - player.y, mouseX - player.x);
+  let diff = targetAngle - player.angle;
+  while(diff > Math.PI) diff -= Math.PI*2;
+  while(diff < -Math.PI) diff += Math.PI*2;
+  player.angle += diff * player.rotSmooth;
+
+  // movimiento: W consume 1%/s
+  if(!fuelDepleted && !dying && !dead){
+    const boosting = (keys['ShiftLeft'] || keys['ShiftRight']) && fuel > 0;
+    if(keys['KeyW'] && fuel > 0){
+      const fuelCostThisFrame = fuelPercentToAmount(MOVE_FUEL_PERCENT_PER_SECOND) * dt;
+      if(fuel >= fuelCostThisFrame){
+        const mult = boosting ? player.boostMultiplier : 1;
+        player.vx += Math.cos(player.angle) * player.thrust * mult;
+        player.vy += Math.sin(player.angle) * player.thrust * mult;
+        fuel = Math.max(0, fuel - fuelCostThisFrame);
+      }
+    }
+    if(keys['KeyS']){
+      player.vx -= Math.cos(player.angle) * (player.thrust * 0.7);
+      player.vy -= Math.sin(player.angle) * (player.thrust * 0.7);
+    }
+    if(keys['KeyX']){
+      player.vx *= 0.85;
+      player.vy *= 0.85;
+    }
+    if(keys['Space']) shoot();
+    if(keys['KeyT']) { openShop(); keys['KeyT'] = false; }
+  }
+
+  // tope de velocidad y fricción
+  const sp = Math.hypot(player.vx, player.vy);
+  if(sp > player.maxSpeed){
+    player.vx = player.vx / sp * player.maxSpeed;
+    player.vy = player.vy / sp * player.maxSpeed;
+  }
+  player.vx *= 0.993;
+  player.vy *= 0.993;
+
+  // movimiento
+  if(!dying){
+    player.x += player.vx;
+    player.y += player.vy;
+  } else {
+    const shakeMag = 3 + 6*(1 - Math.max(0, life)/lifeMax);
+    player.x += Math.sin(performance.now()/30)*shakeMag*dt*60;
+    player.y += Math.cos(performance.now()/25)*shakeMag*dt*60;
+  }
+  wrapPos(player);
+
+  // timers y entidades
+  if(player.shootTimer>0) player.shootTimer = Math.max(0, player.shootTimer - dt);
+
+  for(let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    b.x += b.vx; b.y += b.vy; b.life--;
+    wrapPos(b);
+    if(b.life<=0) bullets.splice(i,1);
+  }
+
+  // balas enemigas
+  for(let i=enemyBullets.length-1;i>=0;i--){
+    const b = enemyBullets[i];
+    b.x += b.vx; b.y += b.vy; b.life--;
+    wrapPos(b);
+    if(!dying && !dead && dist2(b,player) < (player.radius+4)*(player.radius+4)){
+      life = Math.max(0, life - 5);
+      enemyBullets.splice(i,1);
+      continue;
+    }
+    if(b.life<=0) enemyBullets.splice(i,1);
+  }
+
+  // asteroides
+  for(let i=asteroids.length-1;i>=0;i--){
+    const a = asteroids[i];
+    a.x += a.vx; a.y += a.vy; a.angle += a.rot;
+    wrapPos(a);
+    for(let j=bullets.length-1;j>=0;j--){
+      const b = bullets[j];
+      if(dist2(a,b) < (a.radius+2)*(a.radius+2)){
+        bullets.splice(j,1);
+        a.hp--;
+        if(a.hp<=0){
+          const wasSize = a.size;
+          if(a.size>1){
+            for(let k=0;k<2;k++){
+              let childSize;
+              const roll = Math.random();
+              const favorSmall = Math.min(0.6, (difficultyLevel - 1) * 0.06);
+              if(roll < 0.5 + favorSmall){
+                childSize = Math.max(1, a.size - 1);
+              } else {
+                childSize = Math.max(1, a.size - 2);
+              }
+              const ang = rand(0,Math.PI*2);
+              const childSpeed = (1+Math.random()*2) * asteroidSpeedMultiplier;
+              asteroids.push({
+                x:a.x + Math.cos(ang)*10, y:a.y + Math.sin(ang)*10,
+                vx: Math.cos(ang)*childSpeed, vy: Math.sin(ang)*childSpeed,
+                size:childSize, angle: rand(0,Math.PI*2), rot: rand(-0.03,0.03),
+                radius: childSize===3?40: childSize===2?24:12, hp:childSize
+              });
+            }
+            const dropIndex = randInt(0,1);
+            const offset = 28;
+            pickups.push({x:a.x + offset, y:a.y + rand(-offset,offset), type: dropIndex===0 ? 'gem' : 'fuel'});
+            pickups.push({x:a.x - offset, y:a.y + rand(-offset,offset), type: dropIndex===0 ? 'fuel' : 'gem'});
+            if(wasSize===3 && Math.random() < 0.5){
+              enemies.push({
+                x: a.x + rand(-30,30), y: a.y + rand(-30,30),
+                vx: rand(-1,1), vy: rand(-1,1), speed: enemySpeedBase * enemySpeedMultiplier, radius:14,
+                shootTimer: rand(0.5,2.0) * enemyShootCooldownMultiplier, shootCooldown: rand(1.0,2.5) * enemyShootCooldownMultiplier
+              });
+            }
+          } else {
+            pickups.push({x:a.x + rand(-12,12), y:a.y + rand(-12,12), type: Math.random()<0.5 ? 'gem' : 'fuel'});
+          }
+          asteroids.splice(i,1);
+        }
+        break;
+      }
+    }
+  }
+
+  // pickups
+  for(let i=pickups.length-1;i>=0;i--){
+    const p = pickups[i];
+    if(dist2(p,player) < (player.radius+16)*(player.radius+16)){
+      if(p.type==='gem'){ score += 100; gemCount += 1; }
+      else if(p.type==='fuel'){ fuel = Math.min(fuelMax, fuel + 40); }
+      pickups.splice(i,1);
+      updateUI();
+    }
+  }
+
+  // enemigos
+  for(let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    const dx = player.x - e.x, dy = player.y - e.y;
+    const ang = Math.atan2(dy,dx);
+    e.vx += Math.cos(ang)*0.05;
+    e.vy += Math.sin(ang)*0.05;
+    const sp2 = Math.hypot(e.vx,e.vy);
+    if(sp2 > e.speed){ e.vx = e.vx/sp2*e.speed; e.vy = e.vy/sp2*e.speed; }
+    e.x += e.vx; e.y += e.vy;
+    wrapPos(e);
+
+    e.shootTimer -= dt;
+    if(e.shootTimer <= 0){
+      enemyShoot(e);
+      e.shootTimer = e.shootCooldown;
+    }
+
+    for(let j=bullets.length-1;j>=0;j--){
+      if(dist2(e, bullets[j]) < (e.radius+2)*(e.radius+2)){
+        bullets.splice(j,1);
+        pickups.push({x:e.x, y:e.y, type:'gem'});
+        enemies.splice(i,1);
+        score += 150;
+        updateUI();
+        break;
+      }
+    }
+
+    if(dist2(e,player) < (e.radius + player.radius)*(e.radius + player.radius)){
+      player.vx += (player.x - e.x)*0.03;
+      player.vy += (player.y - e.y)*0.03;
+      enemies.splice(i,1);
+    }
+  }
+
+  // partículas
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.age += dt;
+    p.x += p.vx; p.y += p.vy;
+    p.vx *= 0.98; p.vy *= 0.98;
+    if(p.age >= p.life) particles.splice(i,1);
+  }
+
+  // spawns dinámicos
+  asteroidSpawnTimer += dt;
+  if(asteroidSpawnTimer >= asteroidSpawnInterval){
+    asteroidSpawnTimer = 0;
+    const edge = randInt(0,3);
+    let x = edge === 0 ? 0 : edge === 1 ? W : rand(0,W);
+    let y = edge === 2 ? 0 : edge === 3 ? H : rand(0,H);
+    if(edge === 0 || edge === 1){ y = rand(0,H); x = edge === 0 ? -20 : W+20; }
+    if(edge === 2 || edge === 3){ x = rand(0,W); y = edge === 2 ? -20 : H+20; }
+    spawnAsteroid(x,y);
+  }
+
+  enemySpawnTimer += dt;
+  if(enemySpawnTimer >= enemySpawnInterval){
+    enemySpawnTimer = 0;
+    spawnEnemyRandom();
+  }
+
+  // UI
+  updateUI();
+
+  // fuel depleted
+  if(fuel <= 0 && !fuelDepleted){
+    fuelDepleted = true;
+    setOverlayVisible(document.getElementById('overlay'), true);
+    gameRunning = false;
+  }
+
+  // life depleted
+  if(life <= 0 && !dying && !dead){
+    dying = true;
+    deathTimer = 0;
+  }
+
+  if(dying){
+    deathTimer += dt;
+    if(deathTimer >= 1 && !dead){
+      radialExplosion(player.x, player.y, 6.5, 160);
+      for(let i=0;i<40;i++){
+        const ang = rand(0,Math.PI*2);
+        const sp = rand(2,8);
+        spawnParticle(player.x, player.y, Math.cos(ang)*sp, Math.sin(ang)*sp, rand(0.8,1.6), `rgba(255,${Math.floor(rand(80,200))},0,1)`, rand(3,6));
+      }
+      dead = true;
+      dying = false;
+      gameRunning = false;
+      setOverlayVisible(document.getElementById('overlayDead'), true);
+    }
+  }
+}
+
+/* -------------------------
+   DIBUJAR
+   ------------------------- */
+function draw(){
+  ctx.clearRect(0,0,W,H);
+
+  // asteroides
+  ctx.strokeStyle = '#888';
+  for(const a of asteroids){
+    ctx.save();
+    ctx.translate(a.x,a.y);
+    ctx.rotate(a.angle);
+    ctx.beginPath();
+    const spikes = 8;
+    for(let i=0;i<spikes;i++){
+      const r = a.radius * (0.75 + Math.random()*0.5);
+      const ang = i*(Math.PI*2/spikes);
+      const x = Math.cos(ang)*r, y = Math.sin(ang)*r;
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // pickups
+  for(const p of pickups){
+    if(p.type==='gem'){
+      const size = 28;
+      if(gemImg && gemImg.src && gemImg.complete && gemImg.naturalWidth > 0){
+        ctx.drawImage(gemImg, p.x - size/2, p.y - size/2, size, size);
+      } else {
+        ctx.save();
+        ctx.translate(p.x,p.y);
+        ctx.rotate(0.6);
+        ctx.fillStyle = '#4af';
+        ctx.beginPath();
+        ctx.moveTo(0,-8); ctx.lineTo(6,0); ctx.lineTo(0,8); ctx.lineTo(-6,0); ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+    } else {
+      const size = 28;
+      if(fuelImg && fuelImg.src && fuelImg.complete && fuelImg.naturalWidth > 0){
+        ctx.drawImage(fuelImg, p.x - size/2, p.y - size/2, size, size);
+      } else {
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(p.x-10,p.y-10,20,20);
+        ctx.strokeStyle = '#000'; ctx.strokeRect(p.x-10,p.y-10,20,20);
+      }
+    }
+  }
+
+  // enemies
+  for(const e of enemies){
+    drawTriangle(e.x,e.y, Math.atan2(e.vy,e.vx), 12, '#f33', true);
+  }
+
+  // bullets jugador
+  ctx.fillStyle = '#fff';
+  for(const b of bullets) ctx.fillRect(b.x-2,b.y-2,4,4);
+
+  // balas enemigas
+  ctx.fillStyle = '#f55';
+  for(const b of enemyBullets) ctx.fillRect(b.x-3,b.y-3,6,6);
+
+  // partículas
+  for(const p of particles){
+    const alpha = 1 - (p.age / p.life);
+    ctx.fillStyle = p.color.replace(/,1\)/, `,${alpha})`);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // player
+  let color = '#fff';
+  if(fuel<=0) color = '#777';
+  if(dying) color = '#ff8c00';
+  if(dead) color = '#550000';
+  drawTriangle(player.x, player.y, player.angle, player.radius, color, true);
+}
+
+/* -------------------------
+   LOOP PRINCIPAL
+   ------------------------- */
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+/* -------------------------
+   SPAWNS PERIÓDICOS Y BOTONES
+   ------------------------- */
+setInterval(()=>{
+  if(asteroids.length < 5 && !dead) spawnAsteroid(rand(0,W), rand(0,H), randInt(2,3));
+}, 3000);
+
+document.getElementById('restartBtn').addEventListener('click', ()=> resetGame());
+document.getElementById('restartBtn2').addEventListener('click', ()=> resetGame());
+document.getElementById('shopBtn').addEventListener('click', ()=> openShop());
+document.getElementById('closeShop').addEventListener('click', ()=> closeShop());
+
+/* -------------------------
+   UI helpers
+   ------------------------- */
+function updateUI(){
+  document.getElementById('score').textContent = score;
+  document.getElementById('fuelFill').style.width = (fuel/fuelMax*100) + '%';
+  document.getElementById('lifeFill').style.width = (life/lifeMax*100) + '%';
+  document.getElementById('gemCount').textContent = gemCount;
+}
+
+/* -------------------------
+   INICIALIZAR
+   ------------------------- */
+applyDifficulty(difficultyLevel);
+resetGame();
+renderShop();
+</script>
+</body>
+</html>
